@@ -51,12 +51,16 @@
 #include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
-#include "utils/relcache.h"
-#include "utils/typcache.h"
+
+#include "catalog/pg_proc.h"
+#include "optimizer/planmain.h"
 
 
 /* planner functions forward declarations */
 static void ErrorIfModifyQueryNotSupported(Query *queryTree);
+static bool ContainsDisallowedFunctionCalls(Node *expression);
+static bool ContainsDisallowedFunctionCallsWalker(Node *expression, bool *containsVar);
+static char StrictestVolatileFlag(char left, char right);
 static Task * RouterModifyTask(Query *query);
 #if (PG_VERSION_NUM >= 90500)
 static OnConflictExpr * RebuildOnConflict(Oid relationId,
@@ -118,7 +122,6 @@ MultiRouterPlanCreate(Query *query)
 
 	return multiPlan;
 }
-
 
 /*
  * ErrorIfModifyQueryNotSupported checks if the query contains unsupported features,
@@ -272,15 +275,33 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 				continue;
 			}
 
-			if (contain_mutable_functions((Node *) targetEntry->expr))
+			if (commandType == CMD_UPDATE &&
+			    contain_volatile_functions((Node *) targetEntry->expr))
 			{
 				hasNonConstTargetEntryExprs = true;
+				break;
 			}
 
 			if (commandType == CMD_UPDATE &&
 				targetEntry->resno == partitionColumn->varattno)
 			{
 				specifiesPartitionValue = true;
+			}
+
+			if (targetEntry->resno == partitionColumn->varattno &&
+				!IsA(targetEntry->expr, Const))
+			{
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("values given for the partition column must be"
+							   " constants or constant expressions")));
+			}
+
+			if (commandType == CMD_UPDATE &&
+				ContainsDisallowedFunctionCalls((Node *) targetEntry->expr))
+			{
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("STABLE functions used in UPDATE queries"
+									   " cannot be called with column references")));
 			}
 		}
 
@@ -363,6 +384,186 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("modifying the partition value of rows is not allowed")));
 	}
+}
+
+
+/*
+ * This expression may not contain VOLATILE functions.
+ * If may contain STABLE functions, but only if none of their parameters are derived from
+ * a Var.
+ */
+static bool ContainsDisallowedFunctionCalls(Node *expression)
+{
+	bool unused = false;
+	return ContainsDisallowedFunctionCallsWalker(expression, &unused);
+}
+
+
+/*
+ * Almost everything is allowed, except for
+ *
+ * Top -> StableFunc -> Var
+ *
+ * or an indirect
+ *
+ * Top -> StableFunc -> ImmutableFunc -> Var
+ *
+ * If we see a Var we signal to our caller by setting containsVar which then gets
+ * propogated up. Throw an error if we're a StableFunc and our child set containsVar
+ */
+static bool ContainsDisallowedFunctionCallsWalker(Node *expression, bool *containsVar)
+{
+	char volatileFlag = 0;
+	bool childContainsVar = false;
+	bool containsDisallowedFunction = false;
+
+	if (expression == NULL)
+	{
+		return false;
+	}
+
+	if (IsA(expression, Var))
+	{
+		*containsVar = true;
+		return false;
+	}
+
+	/* this list of nodes is taken from contain_mutable_functions_walker */
+	if (IsA(expression, OpExpr))
+	{
+		OpExpr *expr = (OpExpr *) expression;
+
+		set_opfuncid(expr);
+		volatileFlag = func_volatile(expr->opfuncid);
+	}
+	else if (IsA(expression, FuncExpr))
+	{
+		FuncExpr *expr = (FuncExpr *) expression;
+
+		volatileFlag = func_volatile(expr->funcid);
+	}
+	else if (IsA(expression, DistinctExpr))
+	{
+		/*
+		 * to exercise this, you need to create a custom type for which the '=' operator
+		 * is STABLE/VOLATILE
+		 */
+		DistinctExpr *expr = (DistinctExpr *) expression;
+
+		set_opfuncid((OpExpr *) expr);	/* rely on struct equivalence */
+		volatileFlag = func_volatile(expr->opfuncid);
+	}
+	else if (IsA(expression, NullIfExpr))
+	{
+		/*
+		 * same as above, exercising this requires a STABLE/VOLATILE '=' operator
+		 */
+		NullIfExpr *expr = (NullIfExpr *) expression;
+
+		set_opfuncid((OpExpr *) expr);	/* rely on struct equivalence */
+		volatileFlag = func_volatile(expr->opfuncid);
+	}
+	else if (IsA(expression, ScalarArrayOpExpr))
+	{
+		/*
+		 * to exercise this you need to CREATE OPERATOR with a binary predicate
+		 * and use it within an ANY/ALL clause.
+		 */
+		ScalarArrayOpExpr *expr = (ScalarArrayOpExpr *) expression;
+
+		set_sa_opfuncid(expr);
+		volatileFlag = func_volatile(expr->opfuncid);
+	}
+	else if (IsA(expression, CoerceViaIO))
+	{
+		/*
+		 * to exercise this you need to use a type with a STABLE/VOLATILE intype or
+		 * outtype.
+		 */
+		CoerceViaIO *expr = (CoerceViaIO *) expression;
+		Oid			iofunc;
+		Oid			typioparam;
+		bool		typisvarlena;
+
+		/* check the result type's input function */
+		getTypeInputInfo(expr->resulttype,
+						 &iofunc, &typioparam);
+		volatileFlag = StrictestVolatileFlag(volatileFlag, func_volatile(iofunc));
+
+		/* check the input type's output function */
+		getTypeOutputInfo(exprType((Node *) expr->arg),
+						  &iofunc, &typisvarlena);
+		volatileFlag = StrictestVolatileFlag(volatileFlag, func_volatile(iofunc));
+	}
+	else if (IsA(expression, ArrayCoerceExpr))
+	{
+		ArrayCoerceExpr *expr = (ArrayCoerceExpr *) expression;
+
+		if (OidIsValid(expr->elemfuncid))
+		{
+			volatileFlag = func_volatile(expr->elemfuncid);
+		}
+	}
+	else if (IsA(expression, RowCompareExpr))
+	{
+		RowCompareExpr *rcexpr = (RowCompareExpr *) expression;
+		ListCell   *opid;
+
+		foreach(opid, rcexpr->opnos)
+		{
+			volatileFlag = StrictestVolatileFlag(volatileFlag,
+												 op_volatile(lfirst_oid(opid)));
+		}
+	}
+	else if (IsA(expression, Query))
+	{
+		/* subqueries aren't allowed and fail before control reaches this point */
+		Assert(false);
+	}
+
+	if (volatileFlag == PROVOLATILE_VOLATILE)
+	{
+		/* the caller should have already checked for this */
+		Assert(false);
+	}
+	else if (volatileFlag == PROVOLATILE_STABLE)
+	{
+		containsDisallowedFunction =
+			expression_tree_walker(expression,
+								   ContainsDisallowedFunctionCallsWalker,
+								   &childContainsVar);
+
+		return (containsDisallowedFunction || childContainsVar);
+	}
+
+	/* keep traversing */
+	return expression_tree_walker(expression,
+								  ContainsDisallowedFunctionCallsWalker,
+								  containsVar);
+}
+
+
+/*
+ * Return the most-pessimistic volatility flag of the two params.
+ *
+ * for example: given two flags, if one is stable and one is volatile, an expression
+ * involving both is volatile.
+ */
+char StrictestVolatileFlag(char left, char right)
+{
+	char strictestFlag = PROVOLATILE_IMMUTABLE;
+
+	if(left == PROVOLATILE_STABLE || right == PROVOLATILE_STABLE)
+	{
+		strictestFlag = PROVOLATILE_STABLE;
+	}
+
+	if(left == PROVOLATILE_VOLATILE || right == PROVOLATILE_VOLATILE)
+	{
+		strictestFlag = PROVOLATILE_VOLATILE;
+	}
+
+	return strictestFlag;
 }
 
 
@@ -1044,3 +1245,4 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 
 	return false;
 }
+

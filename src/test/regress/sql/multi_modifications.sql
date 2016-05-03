@@ -1,6 +1,7 @@
 -- ===================================================================
 -- test end-to-end modification functionality
 -- ===================================================================
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 103066;
 
 CREATE TYPE order_side AS ENUM ('buy', 'sell');
 
@@ -10,7 +11,8 @@ CREATE TABLE limit_orders (
 	bidder_id bigint NOT NULL,
 	placed_at timestamp NOT NULL,
 	kind order_side NOT NULL,
-	limit_price decimal NOT NULL DEFAULT 0.00 CHECK (limit_price >= 0.00)
+	limit_price decimal NOT NULL DEFAULT 0.00 CHECK (limit_price >= 0.00),
+	array_of_values integer[]
 );
 
 CREATE TABLE insufficient_shards ( LIKE limit_orders );
@@ -115,7 +117,7 @@ SET client_min_messages TO DEFAULT;
 INSERT INTO limit_orders VALUES (random() * 100, 'ORCL', 152, '2011-08-25 11:50:45',
 								 'sell', 0.58);
 
--- commands with expressions that cannot be collapsed are unsupported
+-- values for other columns are totally fine
 INSERT INTO limit_orders VALUES (2036, 'GOOG', 5634, now(), 'buy', random());
 
 -- commands with mutable functions in their quals
@@ -248,8 +250,27 @@ UPDATE limit_orders SET symbol = LOWER(symbol) WHERE id = 246;
 
 SELECT symbol, bidder_id FROM limit_orders WHERE id = 246;
 
--- updates referencing non-IMMUTABLE functions are unsupported
+-- updates referencing STABLE functions are allowed
 UPDATE limit_orders SET placed_at = now() WHERE id = 246;
+-- so are binary operators
+UPDATE limit_orders SET array_of_values = 1 || array_of_values WHERE id = 246;
+
+CREATE FUNCTION immutable_append(old_values int[], new_value int)
+RETURNS int[] AS $$ SELECT old_values || new_value $$ LANGUAGE SQL IMMUTABLE;
+
+-- immutable function calls with vars are also allowed
+UPDATE limit_orders
+SET array_of_values = immutable_append(array_of_values, 2) WHERE id = 246;
+
+CREATE FUNCTION stable_append(old_values int[], new_value int)
+RETURNS int[] AS $$ BEGIN RETURN old_values || new_value; END; $$
+LANGUAGE plpgsql STABLE;
+
+-- but STABLE function calls with vars are not allowed
+UPDATE limit_orders
+SET array_of_values = stable_append(array_of_values, 3) WHERE id = 246;
+
+SELECT array_of_values FROM limit_orders WHERE id = 246;
 
 -- cursors are not supported
 UPDATE limit_orders SET symbol = 'GM' WHERE CURRENT OF cursor_name;
