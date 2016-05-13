@@ -997,8 +997,6 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 		OpExpr *opExpr = (OpExpr *) node;
 		bool simpleExpression = SimpleOpExpression((Expr *) opExpr);
 		bool columnInExpr = false;
-		char *operatorName = NULL;
-		int operatorNameComparison = 0;
 		bool usingEqualityOperator = false;
 
 		if (!simpleExpression)
@@ -1012,10 +1010,7 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 			return false;
 		}
 
-		operatorName = get_opname(opExpr->opno);
-		operatorNameComparison = strncmp(operatorName, EQUAL_OPERATOR_STRING,
-										 NAMEDATALEN);
-		usingEqualityOperator = (operatorNameComparison == 0);
+		usingEqualityOperator = EqualsOperator(opExpr->opno);
 
 		return usingEqualityOperator;
 	}

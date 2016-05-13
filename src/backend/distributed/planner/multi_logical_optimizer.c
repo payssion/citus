@@ -3143,8 +3143,7 @@ SupportedLateralQuery(Query *parentQuery, Query *lateralQuery)
 	{
 		OpExpr *operatorExpression = NULL;
 		List *argumentList = NIL;
-		char *operatorName = NULL;
-		int equalsOperator = 0;
+		bool equalsOperator = false;
 		Expr *leftArgument = NULL;
 		Expr *rightArgument = NULL;
 		Expr *outerQueryExpression = NULL;
@@ -3175,15 +3174,8 @@ SupportedLateralQuery(Query *parentQuery, Query *lateralQuery)
 			continue;
 		}
 
-		/*
-		 * We accept all column types that can be joined with an equals sign as
-		 * valid. These include columns that have cross-type equals operators
-		 * (such as int48eq) and columns that can be casted at run-time (such as
-		 * from numeric to int4).
-		 */
-		operatorName = get_opname(operatorExpression->opno);
-		equalsOperator = strncmp(operatorName, EQUAL_OPERATOR_STRING, NAMEDATALEN);
-		if (equalsOperator != 0)
+		equalsOperator = EqualsOperator(operatorExpression->opno);
+		if (!equalsOperator)
 		{
 			continue;
 		}
