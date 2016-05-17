@@ -45,7 +45,7 @@ SELECT count(*) FROM customer_copy_hash;
 -- Test primary key violation
 COPY customer_copy_hash (c_custkey, c_name) FROM STDIN
 WITH (FORMAT 'csv');
-ERROR:  duplicate key value violates unique constraint "customer_copy_hash_pkey_103160"
+ERROR:  duplicate key value violates unique constraint "customer_copy_hash_pkey_103161"
 DETAIL:  Key (c_custkey)=(2) already exists.
 -- Confirm that no data was copied
 SELECT count(*) FROM customer_copy_hash;

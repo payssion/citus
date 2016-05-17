@@ -266,9 +266,9 @@ WHERE shardid = :new_shard_id AND nodename = 'localhost' and nodeport = 5432;
 
 -- deleting or updating a non-existent row should fail
 SELECT delete_shard_placement_row(:new_shard_id, 'wrong_localhost', 5432);
-ERROR:  could not find valid entry for shard placement 103024 on node "wrong_localhost:5432"
+ERROR:  could not find valid entry for shard placement 103025 on node "wrong_localhost:5432"
 SELECT update_shard_placement_row_state(:new_shard_id, 'localhost', 5432, 3);
-ERROR:  could not find valid entry for shard placement 103024 on node "localhost:5432"
+ERROR:  could not find valid entry for shard placement 103025 on node "localhost:5432"
 -- now we'll even test our lock methods...
 -- use transaction to bound how long we hold the lock
 BEGIN;
