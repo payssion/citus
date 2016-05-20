@@ -72,7 +72,7 @@ static Const * ExtractInsertPartitionValue(Query *query, Var *partitionColumn);
 static Task * RouterSelectTask(Query *query);
 static Job * RouterQueryJob(Query *query, Task *task);
 static bool ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column);
-
+static void RouterSetRangeTablesInherited(Query *query);
 
 /*
  * MultiRouterPlanCreate creates a physical plan for given router plannable query.
@@ -88,7 +88,24 @@ MultiRouterPlanCreate(Query *query)
 	Job *job = NULL;
 	MultiPlan *multiPlan = NULL;
 	CmdType commandType = query->commandType;
+	ListCell *listCell = NULL;
 	bool modifyTask = false;
+	bool rangeTableInherited = true;
+
+	/*
+	 * We extract RangeTblEntry entries from joinTreeNode and set their inh flag
+	 * to true so that deparser will not add ONLY clause to them.
+	 */
+	foreach(listCell, query->jointree->fromlist)
+	{
+		Node *joinTreeNode = (Node *) lfirst(listCell);
+		if (IsA(joinTreeNode, RangeTblRef))
+		{
+			int rangeTableIndex = ((RangeTblRef *) joinTreeNode)->rtindex;
+			RangeTblEntry *rangeTable = rt_fetch(rangeTableIndex, query->rtable);
+			rangeTable->inh = rangeTableInherited;
+		}
+	}
 
 	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
 		commandType == CMD_DELETE)
@@ -424,6 +441,12 @@ RouterModifyTask(Query *query)
 	/* always set to false for PG_VERSION_NUM < 90500 */
 	upsertQuery = false;
 #endif
+
+	/*
+	 * We set inh flag of all range tables entries to true so that deparser will not
+	 * add ONLY keyword to resulting query string.
+	*/
+	RouterSetRangeTablesInherited(query);
 
 	deparse_shard_query(query, shardInterval->relationId, shardId, queryString);
 	ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
@@ -779,6 +802,12 @@ RouterSelectTask(Query *query)
 		joinTree->quals = whereClause;
 	}
 
+	/*
+	 * We set inh flag of all range tables entries to true so that deparser will not
+	 * add ONLY keyword to resulting query string.
+	*/
+	RouterSetRangeTablesInherited(query);
+
 	deparse_shard_query(query, shardInterval->relationId, shardId, queryString);
 	ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
 
@@ -1043,4 +1072,22 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 	}
 
 	return false;
+}
+
+/*
+ * RouterSetRangeTablesInherited sets inh flag of all range table entries to true.
+ * We basically iterate over all range table entries and set their inh flag.
+ */
+static void
+RouterSetRangeTablesInherited(Query *query)
+{
+	List *rangeTableList = query->rtable;
+	ListCell *rangeTableCell = NULL;
+	bool rangeTableEntryInherited = true;
+
+	foreach(rangeTableCell, rangeTableList)
+	{
+		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
+		rangeTableEntry->inh = rangeTableEntryInherited;
+	}
 }
