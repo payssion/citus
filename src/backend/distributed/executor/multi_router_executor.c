@@ -81,7 +81,7 @@ static Node * EvaluateExpression(Node *expression);
 
 static void DeparseShardQuery(Query *query, Task *task, StringInfo queryString);
 static Expr *citus_evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
-						   Oid result_collation);
+								 Oid result_collation);
 
 
 /*
@@ -289,8 +289,6 @@ ExecuteDistributedModify(Query *query, Task *task)
 
 	ExecuteFunctions(query);
 	DeparseShardQuery(query, task, queryString);
-	elog(DEBUG4, "old query: %s", task->queryString);
-	elog(DEBUG4, "new query: %s", queryString->data);
 
 	foreach(taskPlacementCell, task->taskPlacementList)
 	{
@@ -641,29 +639,13 @@ RouterExecutorEnd(QueryDesc *queryDesc)
 }
 
 /*
- * Walks the query looking for and evaluating expressions which don't contain Vars.
- *
- * If you have a var your entire part of the tree cannot be evaluated.
- * So, nothing can be evaluated until we hit a leaf.
- * However, it would be very wasteful to evaluate at every step. If there are no Vars
- * we would prefer to only walk the tree once and do a single evaluation at the end.
- *
- * When evaluating a tree:
- * - if this is a node where some children have vars and some don't, evaluate the ones
- *   without
- * - if this is a node and there are no Vars, continue going up.
- * - if this is the top of the tree and there are no Vars evaluate the whole thing
- * - if this node is a var, signal the parent
- * - if this node has a var, signal the parent
+ * Walks each TargetEntry of the query, evaluates sub-expressions without Vars.
  */
 void ExecuteFunctions(Query *query)
 {
 	CmdType commandType = query->commandType;
 	ListCell *targetEntryCell = NULL;
 	Node *modifiedNode = NULL;
-
-	Oid relid = ((RangeTblEntry *) linitial(query->rtable))->relid;
-	List *deparseContext = deparse_context_for("table", relid);
 
 	/* DELETE has no targetList */
 	if (!(commandType == CMD_INSERT) && !(commandType == CMD_UPDATE))
@@ -685,19 +667,24 @@ void ExecuteFunctions(Query *query)
 			continue;
 		}
 
-		deparsedOrig = deparse_expression(originalCopy, deparseContext, false, true);
-		elog(DEBUG4, "target: %s", deparsedOrig);
-
 		modifiedNode = PartiallyEvaluateExpression((Node *) targetEntry->expr);
 
 		targetEntry->expr = (Expr *) modifiedNode;
 		modifiedCopy = (Node *) copyObject(targetEntry->expr);
-
-		deparsedModified = deparse_expression(modifiedCopy, deparseContext, false, false);
-		elog(DEBUG4, "after : %s", deparsedModified);
 	}
 }
 
+/*
+ * Walks the expression, evaluates sub-expressions which don't contain Vars.
+ *
+ * The flow of control is a little convoluted to prevent ourselves from needing to walk
+ * parts of the tree multiple times. When we walk a node which contains multiple
+ * sub-trees we recurse and remember which parts of the tree contained a Var. If some
+ * did and some didn't we evaluate the parts of the tree which didn't. If none of the
+ * sub-trees contained a Var we do nothing besides reporting that fact.
+ *
+ * At the top-level of the expression we evaluate everything if no Vars were found.
+ */
 static Node * PartiallyEvaluateExpression(Node *expression)
 {
 	ExpressionWalkerState unused;
@@ -709,7 +696,7 @@ static Node * PartiallyEvaluateExpression(Node *expression)
 
 
 static Node * PartiallyEvaluateExpressionWalker(Node *expression,
-		ExpressionWalkerState *state)
+		ExpressionWalkerState *parentState)
 {
 	ExpressionWalkerState childState;
 	Node *copy = NULL;
@@ -721,11 +708,12 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 		return expression;
 	}
 
+	/* We won't modify any argument lists so pass them back to mutator to copy for us */
 	if (IsA(expression, List))
 	{
 		return expression_tree_mutator(expression,
 									   PartiallyEvaluateExpressionWalker,
-									   state);
+									   parentState);
 	}
 
 	InitializeWalkerState(&childState);
@@ -746,26 +734,28 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 								   PartiallyEvaluateExpressionWalker,
 								   &childState);
 
-	if (state->parentIsBranch)
+	if (parentState->parentIsBranch)
 	{
 		if (childState.containsVar || isVar)
 		{
-			state->subtreesWithVar = lappend(state->subtreesWithVar, copy);
-			state->subtreeOrder = lappend_int(state->subtreeOrder, 0);
+			parentState->subtreesWithVar = lappend(parentState->subtreesWithVar, copy);
+			parentState->subtreeOrder = lappend_int(parentState->subtreeOrder, 0);
 		}
 		else
 		{
-			state->subtreesWithoutVar = lappend(state->subtreesWithoutVar, copy);
-			state->subtreeOrder = lappend_int(state->subtreeOrder, 1);
+			parentState->subtreesWithoutVar = lappend(parentState->subtreesWithoutVar,
+													  copy);
+			parentState->subtreeOrder = lappend_int(parentState->subtreeOrder, 1);
 		}
 	}
 
 	if (childState.containsVar || isVar)
 	{
-		state->containsVar = true;
+		parentState->containsVar = true;
 	}
 
-	if (isBranch && state->isTopLevel && list_length(childState.subtreesWithVar) == 0)
+	if (isBranch && parentState->isTopLevel &&
+		list_length(childState.subtreesWithVar) == 0)
 	{
 		return EvaluateExpression(expression);
 	}
