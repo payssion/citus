@@ -755,7 +755,11 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 		}
 	}
 
-	parentState->containsVar = containsVar;
+	/* never set containsVar=false because parentState is shared between sibling trees */
+	if (containsVar)
+	{
+		parentState->containsVar = true;
+	}
 
 	if (isBranch && parentState->isTopLevel &&
 		list_length(childState.subtreesWithVar) == 0)
