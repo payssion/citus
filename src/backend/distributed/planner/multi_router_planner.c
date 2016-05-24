@@ -388,9 +388,10 @@ ErrorIfModifyQueryNotSupported(Query *queryTree)
 
 
 /*
- * This expression may not contain VOLATILE functions.
- * If may contain STABLE functions, but only if none of their parameters are derived from
- * a Var.
+ * Fails if the expression contains STABLE functions which accept any paramaters derived
+ * from a Var. Assumes the expression contains no VOLATILE functions.
+ *
+ * Var's are allowed, but only if they are passed solely to IMMUTABLE functions
  */
 static bool ContainsDisallowedFunctionCalls(Node *expression)
 {
@@ -399,18 +400,6 @@ static bool ContainsDisallowedFunctionCalls(Node *expression)
 }
 
 
-/*
- * Almost everything is allowed, except for
- *
- * Top -> StableFunc -> Var
- *
- * or an indirect
- *
- * Top -> StableFunc -> ImmutableFunc -> Var
- *
- * If we see a Var we signal to our caller by setting containsVar which then gets
- * propogated up. Throw an error if we're a StableFunc and our child set containsVar
- */
 static bool ContainsDisallowedFunctionCallsWalker(Node *expression, bool *containsVar)
 {
 	char volatileFlag = 0;

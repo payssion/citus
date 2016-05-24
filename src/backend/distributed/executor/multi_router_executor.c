@@ -64,6 +64,7 @@ typedef struct ExpressionWalkerState
 static LOCKMODE CommutativityRuleToLockMode(CmdType commandType, bool upsertQuery);
 static void AcquireExecutorShardLock(Task *task, LOCKMODE lockMode);
 static int32 ExecuteDistributedModify(Query *query, Task *task);
+static void DeparseShardQuery(Query *query, Task *task, StringInfo queryString);
 static void ExecuteSingleShardSelect(QueryDesc *queryDesc, uint64 tupleCount,
 									 Task *task, EState *executorState,
 									 TupleDesc tupleDescriptor,
@@ -79,7 +80,6 @@ static void InitializeWalkerState(ExpressionWalkerState *state);
 static List * RewriteArgs(ExpressionWalkerState *state);
 static Node * EvaluateExpression(Node *expression);
 
-static void DeparseShardQuery(Query *query, Task *task, StringInfo queryString);
 static Expr *citus_evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod,
 								 Oid result_collation);
 
@@ -358,6 +358,15 @@ ExecuteDistributedModify(Query *query, Task *task)
 	}
 
 	return affectedTupleCount;
+}
+
+
+void DeparseShardQuery(Query *query, Task *task, StringInfo queryString)
+{
+	uint64 shardId = task->anchorShardId;
+	Oid relid = ((RangeTblEntry *) linitial(query->rtable))->relid;
+
+	deparse_shard_query(query, relid, shardId, queryString);
 }
 
 
@@ -655,11 +664,7 @@ void ExecuteFunctions(Query *query)
 
 	foreach(targetEntryCell, query->targetList)
 	{
-		char *deparsedOrig = NULL;
-		char *deparsedModified = NULL;
 		TargetEntry *targetEntry = (TargetEntry *) lfirst(targetEntryCell);
-		Node *originalCopy = (Node *) copyObject(targetEntry->expr);
-		Node *modifiedCopy = NULL;
 
 		/* performance optimization for the most common cases */
 		if (IsA(targetEntry->expr, Const) || IsA(targetEntry->expr, Var))
@@ -670,7 +675,6 @@ void ExecuteFunctions(Query *query)
 		modifiedNode = PartiallyEvaluateExpression((Node *) targetEntry->expr);
 
 		targetEntry->expr = (Expr *) modifiedNode;
-		modifiedCopy = (Node *) copyObject(targetEntry->expr);
 	}
 }
 
@@ -700,15 +704,15 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 {
 	ExpressionWalkerState childState;
 	Node *copy = NULL;
-	bool isVar = false;
 	bool isBranch = false;
+	bool containsVar = false;
 
 	if (expression == NULL)
 	{
 		return expression;
 	}
 
-	/* We won't modify any argument lists so pass them back to mutator to copy for us */
+	/* pass any argument lists back to the mutator to copy and recurse for us */
 	if (IsA(expression, List))
 	{
 		return expression_tree_mutator(expression,
@@ -720,7 +724,7 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 
 	if (IsA(expression, Var))
 	{
-		isVar = true;
+		containsVar = true;
 	}
 
 	if (IsA(expression, FuncExpr) || IsA(expression, OpExpr))
@@ -734,9 +738,11 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 								   PartiallyEvaluateExpressionWalker,
 								   &childState);
 
+	containsVar |= childState.containsVar;
+
 	if (parentState->parentIsBranch)
 	{
-		if (childState.containsVar || isVar)
+		if (containsVar)
 		{
 			parentState->subtreesWithVar = lappend(parentState->subtreesWithVar, copy);
 			parentState->subtreeOrder = lappend_int(parentState->subtreeOrder, 0);
@@ -749,10 +755,7 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 		}
 	}
 
-	if (childState.containsVar || isVar)
-	{
-		parentState->containsVar = true;
-	}
+	parentState->containsVar = containsVar;
 
 	if (isBranch && parentState->isTopLevel &&
 		list_length(childState.subtreesWithVar) == 0)
@@ -777,9 +780,9 @@ static Node * PartiallyEvaluateExpressionWalker(Node *expression,
 	return copy;
 }
 
+/* evaluate every non-Var arg and return an argument list */
 static List * RewriteArgs(ExpressionWalkerState *state)
 {
-	/* Replace every non-subtree arg with the evaluated version of itself */
 	List *rewrittenArgs = NULL;
 	ListCell *nextArgCell = NULL;
 	int nextArg = 0;
@@ -833,14 +836,6 @@ static Node * EvaluateExpression(Node *expression)
 	return expression;
 }
 
-
-void DeparseShardQuery(Query *query, Task *task, StringInfo queryString)
-{
-	uint64 shardId = task->anchorShardId;
-	Oid relid = ((RangeTblEntry *) linitial(query->rtable))->relid;
-
-	deparse_shard_query(query, relid, shardId, queryString);
-}
 
 static void InitializeWalkerState(ExpressionWalkerState *state)
 {
