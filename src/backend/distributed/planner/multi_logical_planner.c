@@ -928,7 +928,7 @@ IsJoinClause(Node *clause)
 		bool equiJoin = false;
 		bool joinBetweenDifferentTables = false;
 
-		bool equalsOperator = EqualsOperator(operatorExpression->opno);
+		bool equalsOperator = OperatorImplementsEquality(operatorExpression->opno);
 		if (equalsOperator)
 		{
 			equiJoin = true;
@@ -1952,21 +1952,21 @@ MultiSubqueryPushdownTable(RangeTblEntry *subqueryRangeTableEntry)
 
 
 /*
- * EqualsOperator returns true if given opno represents an equality operator. The
- * function retrieves btree interpretation list for this opno and check if
+ * OperatorImplementsEquality returns true if given opno represents an equality operator.
+ * The function retrieves btree interpretation list for this opno and check if
  * BTEqualStrategyNumber strategy is present.
  */
 bool
-EqualsOperator(Oid opno)
+OperatorImplementsEquality(Oid opno)
 {
 	bool equalityOperator = false;
 	List *btreeIntepretationList = get_op_btree_interpretation(opno);
 	ListCell *btreeInterpretationCell = NULL;
 	foreach(btreeInterpretationCell, btreeIntepretationList)
 	{
-		OpBtreeInterpretation *btreeIntepretation =  (OpBtreeInterpretation *)
-			lfirst(btreeInterpretationCell);
-		if (btreeIntepretation->strategy  == BTEqualStrategyNumber)
+		OpBtreeInterpretation *btreeIntepretation = (OpBtreeInterpretation *)
+													lfirst(btreeInterpretationCell);
+		if (btreeIntepretation->strategy == BTEqualStrategyNumber)
 		{
 			equalityOperator = true;
 			break;

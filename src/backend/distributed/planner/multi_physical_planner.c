@@ -2861,7 +2861,8 @@ HashableClauseMutator(Node *originalNode, Var *partitionColumn)
 		ScalarArrayOpExpr *arrayOperatorExpression = (ScalarArrayOpExpr *) originalNode;
 		Node *leftOpExpression = linitial(arrayOperatorExpression->args);
 		Node *strippedLeftOpExpression = strip_implicit_coercions(leftOpExpression);
-		bool usingEqualityOperator = EqualsOperator(arrayOperatorExpression->opno);
+		bool usingEqualityOperator = OperatorImplementsEquality(
+			arrayOperatorExpression->opno);
 
 		/*
 		 * Citus cannot prune hash-distributed shards with ANY/ALL. We show a NOTICE

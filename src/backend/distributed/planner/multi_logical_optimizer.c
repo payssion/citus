@@ -3174,7 +3174,7 @@ SupportedLateralQuery(Query *parentQuery, Query *lateralQuery)
 			continue;
 		}
 
-		equalsOperator = EqualsOperator(operatorExpression->opno);
+		equalsOperator = OperatorImplementsEquality(operatorExpression->opno);
 		if (!equalsOperator)
 		{
 			continue;

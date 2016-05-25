@@ -1010,7 +1010,7 @@ ColumnMatchExpressionAtTopLevelConjunction(Node *node, Var *column)
 			return false;
 		}
 
-		usingEqualityOperator = EqualsOperator(opExpr->opno);
+		usingEqualityOperator = OperatorImplementsEquality(opExpr->opno);
 
 		return usingEqualityOperator;
 	}

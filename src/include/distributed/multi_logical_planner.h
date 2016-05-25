@@ -199,6 +199,7 @@ extern List * TableEntryList(List *rangeTableList);
 extern bool ExtractRangeTableRelationWalker(Node *node, List **rangeTableList);
 extern bool ExtractRangeTableEntryWalker(Node *node, List **rangeTableList);
 extern List * pull_var_clause_default(Node *node);
-extern bool EqualsOperator(Oid opno);
+extern bool OperatorImplementsEquality(Oid opno);
+
 
 #endif   /* MULTI_LOGICAL_PLANNER_H */
