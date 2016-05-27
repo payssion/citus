@@ -199,15 +199,23 @@ ReportRemoteError(PGconn *connection, PGresult *result)
 {
 	char *sqlStateString = PQresultErrorField(result, PG_DIAG_SQLSTATE);
 	char *remoteMessage = PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY);
+	char *remoteDetail = PQresultErrorField(result, PG_DIAG_MESSAGE_DETAIL);
 	char *nodeName = ConnectionGetOptionValue(connection, "host");
 	char *nodePort = ConnectionGetOptionValue(connection, "port");
 	char *errorPrefix = "Connection failed to";
 	int sqlState = ERRCODE_CONNECTION_FAILURE;
+	bool raiseError = false;
 
 	if (sqlStateString != NULL)
 	{
 		sqlState = MAKE_SQLSTATE(sqlStateString[0], sqlStateString[1], sqlStateString[2],
 								 sqlStateString[3], sqlStateString[4]);
+
+		/* if this is constraint violation, raise an error */
+		if (sqlStateString[0] == '2' && sqlStateString[1] == '3')
+		{
+			raiseError = true;
+		}
 
 		/* use more specific error prefix for result failures */
 		if (sqlState != ERRCODE_CONNECTION_FAILURE)
@@ -234,9 +242,28 @@ ReportRemoteError(PGconn *connection, PGresult *result)
 		}
 	}
 
-	ereport(WARNING, (errcode(sqlState),
-					  errmsg("%s %s:%s", errorPrefix, nodeName, nodePort),
-					  errdetail("Remote message: %s", remoteMessage)));
+	if (raiseError)
+	{
+		if (remoteDetail != NULL)
+		{
+			ereport(ERROR, (errcode(sqlState),
+							errmsg("%s %s:%s\nRemote message: %s", errorPrefix,
+								   nodeName, nodePort, remoteMessage),
+							errdetail("%s", remoteDetail)));
+		}
+		else
+		{
+			ereport(ERROR, (errcode(sqlState),
+							errmsg("%s %s:%s\nRemote message: %s", errorPrefix,
+								   nodeName, nodePort, remoteMessage)));
+		}
+	}
+	else
+	{
+		ereport(WARNING, (errcode(sqlState),
+						  errmsg("%s %s:%s", errorPrefix, nodeName, nodePort),
+						  errdetail("Remote message: %s", remoteMessage)));
+	}
 }
 
 
